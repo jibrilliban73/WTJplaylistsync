@@ -1,0 +1,44 @@
+name: WTJ Spotify Playlist Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Preview only (safe). Uncheck to add eligible episodes.'
+        type: boolean
+        default: true
+  schedule:
+    - cron: '17 15 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wtj-playlist-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - name: Sync eligible podcast episodes
+        env:
+          SPOTIFY_REFRESH_TOKEN: ${{ secrets.SPOTIFY_REFRESH_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
+        shell: bash
+        run: |
+          if [[ -z "$SPOTIFY_REFRESH_TOKEN" ]]; then
+            echo 'SPOTIFY_REFRESH_TOKEN is not configured. Add it to Settings > Secrets and variables > Actions.'
+            exit 1
+          fi
+          if [[ "$DRY_RUN" == 'true' ]]; then
+            python wtj_sync.py --dry-run
+          else
+            python wtj_sync.py
+          fi
