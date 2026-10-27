@@ -146,28 +146,30 @@ class Spotify:
 
 
 def classify(episodes, existing):
-    """Treat missing playback status as unknown, not proof of being unplayed."""
+    """Plan changes only when Spotify explicitly reports the playback status."""
     add = []
-    skipped_played = 0
+    remove = []
     skipped_unknown = 0
     skipped_existing = 0
     for episode in episodes:
-        if not episode or not episode.get('uri') or episode.get('is_playable') is False:
+        if not episode or not episode.get('uri'):
             continue
         uri = episode['uri']
-        if uri in existing:
-            skipped_existing += 1
-            continue
         point = episode.get('resume_point')
         if not isinstance(point, dict) or not isinstance(point.get('fully_played'), bool):
             skipped_unknown += 1
             continue
         if point['fully_played']:
-            skipped_played += 1
+            if uri in existing:
+                remove.append(uri)
+            continue
+        if episode.get('is_playable') is False:
+            continue
+        if uri in existing:
+            skipped_existing += 1
             continue
         add.append(uri)
-    return add, skipped_played, skipped_unknown, skipped_existing
-
+    return add, remove, skipped_unknown, skipped_existing
 
 def sync(dry_run=False):
     client = Spotify()
@@ -177,12 +179,18 @@ def sync(dry_run=False):
         if item.get('uri'):
             existing.add(item['uri'])
     episodes = client.iter_items(f'/shows/{SHOW_ID}/episodes')
-    add, played, unknown, duplicate = classify(episodes, existing)
-    print(f'Already in playlist: {duplicate}; fully played excluded: {played}; '
-          f'unknown play status excluded: {unknown}; eligible to add: {len(add)}')
+    add, remove, unknown, duplicate = classify(episodes, existing)
+    print(f'Unfinished episodes already in playlist: {duplicate}; '
+          f'unknown play status excluded: {unknown}; '
+          f'to add: {len(add)}; finished to remove: {len(remove)}')
     if dry_run:
         print('DRY RUN: Playlist unchanged.')
         return
+    for index in range(0, len(remove), 100):
+        chunk = remove[index:index + 100]
+        client.request('DELETE', f'/playlists/{PLAYLIST_ID}/items',
+                       data={'items': [{'uri': uri} for uri in chunk]})
+        print(f'Removed {index + len(chunk)} of {len(remove)}')
     for index in range(0, len(add), 100):
         chunk = add[index:index + 100]
         client.request('POST', f'/playlists/{PLAYLIST_ID}/items', data={'uris': chunk})
