@@ -134,10 +134,10 @@ class Spotify:
             return response.json() if response.content else {}
         raise RuntimeError('Spotify rate-limit retry exhausted')
 
-    def iter_items(self, path):
+    def iter_items(self, path, extra_params=None):
         offset = 0
         while True:
-            page = self.request('GET', path, params={'limit': 50, 'offset': offset})
+            page = self.request('GET', path, params={'limit': 50, 'offset': offset, **(extra_params or {})})
             items = page.get('items', [])
             yield from items
             offset += len(items)
@@ -172,7 +172,7 @@ def classify(episodes, existing):
 def sync(dry_run=False):
     client = Spotify()
     existing = set()
-    for entry in client.iter_items(f'/playlists/{PLAYLIST_ID}/items'):
+    for entry in client.iter_items(f'/playlists/{PLAYLIST_ID}/items', extra_params={'additional_types': 'track,episode'}):
         item = entry.get('item') or entry.get('track') or {}
         if item.get('uri'):
             existing.add(item['uri'])
