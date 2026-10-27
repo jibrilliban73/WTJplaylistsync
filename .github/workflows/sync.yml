@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Preview only (safe). Uncheck to add eligible episodes.'
+        description: 'Preview only. Uncheck to add unfinished episodes and remove finished ones.'
         type: boolean
         default: true
   schedule:
-    - cron: '17 15 * * *'
+    - cron: '7,22,37,52 * * * *'
 
 permissions:
   contents: read
