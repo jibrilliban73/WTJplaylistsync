@@ -4,11 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Preview only. Uncheck to add unfinished episodes and remove finished ones.'
+        description: Preview counts and ordering without editing Spotify
         type: boolean
         default: true
+      verify_only:
+        description: Read-only full audit of membership and ordering
+        type: boolean
+        default: false
   schedule:
     - cron: '7,22,37,52 * * * *'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sync.yml'
+      - 'verified_sync.py'
+      - 'playlist_sort.py'
+      - 'spotify_http.py'
+      - 'podcast_config.json'
+      - 'test_*.py'
 
 permissions:
   contents: read
@@ -20,25 +33,28 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -r requirements.txt
-      - name: Sync eligible podcast episodes
+      - name: Test synchronization, ordering, and rate-limit safeguards
+        run: python -m unittest -v
+      - name: Sync, sort, and independently verify saved playlist
         env:
+          SPOTIFY_CLIENT_ID: '658f7327c1c7439c9cc8cec9aa94de4f'
           SPOTIFY_REFRESH_TOKEN: ${{ secrets.SPOTIFY_REFRESH_TOKEN }}
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          VERIFY_ONLY: ${{ inputs.verify_only }}
         shell: bash
         run: |
-          if [[ -z "$SPOTIFY_REFRESH_TOKEN" ]]; then
-            echo 'SPOTIFY_REFRESH_TOKEN is not configured. Add it to Settings > Secrets and variables > Actions.'
-            exit 1
+          args=(--sort)
+          if [[ "$VERIFY_ONLY" == 'true' ]]; then
+            args+=(--verify-only)
+          elif [[ "$DRY_RUN" == 'true' ]]; then
+            args+=(--dry-run)
           fi
-          if [[ "$DRY_RUN" == 'true' ]]; then
-            python wtj_sync.py --dry-run
-          else
-            python wtj_sync.py
-          fi
+          python verified_sync.py "${args[@]}"
