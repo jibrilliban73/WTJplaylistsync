@@ -12,11 +12,17 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '7,22,37,52 * * * *'
+    # Read-only check of latest episodes; followed by a sync one hour later.
+    - cron: '0 0,12 * * *'
+      timezone: "America/Edmonton"
+    - cron: '0 1,13 * * *'
+      timezone: "America/Edmonton"
   push:
     branches: [main]
     paths:
       - '.github/workflows/sync.yml'
+      - 'check_podcasts.py'
+      - 'test_check_podcasts.py'
       - 'verified_sync.py'
       - 'playlist_sort.py'
       - 'spotify_http.py'
@@ -41,10 +47,76 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Test synchronization, ordering, and rate-limit safeguards
-        run: python -m unittest -v
-      - name: Sync, sort, and independently verify saved playlist
+      - name: Choose lightweight check or full sync
+        id: phase
+        shell: bash
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE_CRON: ${{ github.event.schedule }}
+        run: |
+          case "$EVENT_NAME|$SCHEDULE_CRON" in
+            'schedule|0 0,12 * * *') phase=check ;;
+            'schedule|0 1,13 * * *') phase=sync ;;
+            'workflow_dispatch|') phase=sync ;;
+            'push|') phase=preflight ;;
+            *) echo 'Unexpected schedule; refusing to access Spotify.' >&2; exit 1 ;;
+          esac
+          echo "phase=$phase" >> "$GITHUB_OUTPUT"
+          echo "Phase: $phase (Calgary local timezone: America/Edmonton)"
+      - name: Restore Spotify cooldown and previous successful check
+        uses: actions/cache/restore@v4
+        with:
+          path: .spotify-run-state.json
+          key: spotify-cooldown-${{ github.run_id }}
+          restore-keys: spotify-cooldown-
+      - name: Respect Spotify cooldown and require completed check before sync
+        id: gate
+        shell: bash
+        env:
+          PHASE: ${{ steps.phase.outputs.phase }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PYCODE'
+          import json, os, time
+          from pathlib import Path
+          path = Path('.spotify-run-state.json')
+          try:
+              state = json.loads(path.read_text()) if path.exists() else {}
+              if not isinstance(state, dict):
+                  state = {}
+          except (OSError, ValueError):
+              state = {}
+          now = int(time.time())
+          remaining = int(state.get('cooldown_until', 0)) - now
+          last_check = int(state.get('last_check_success', 0))
+          reason = ''
+          if os.environ['PHASE'] == 'preflight':
+              reason = 'Code validation only: a push never automatically makes Spotify requests.'
+          elif remaining > 0:
+              reason = f'Spotify requested a cooldown for approximately {remaining} more seconds.'
+          elif (os.environ['PHASE'] == 'sync' and os.environ['EVENT_NAME'] == 'schedule'
+                and not (0 <= now - last_check <= 7200)):
+              reason = 'No successful Spotify check in the preceding two hours; skipping this sync safely.'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f"skip={'true' if reason else 'false'}\n")
+          if reason:
+              print('SYNC DEFERRED:', reason)
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+                  out.write('## Spotify access deferred\n\n' + reason + '\nNo Spotify requests or playlist writes were made during this phase.\n')
+          PYCODE
+      - name: Verify tests and playlist safety rules (offline)
+        run: python -m unittest -v
+      - name: Lightweight read-only podcast check
+        if: steps.phase.outputs.phase == 'check' && steps.gate.outputs.skip != 'true'
+        env:
+          SPOTIFY_STATE_FILE: .spotify-run-state.json
+          SPOTIFY_CLIENT_ID: '658f7327c1c7439c9cc8cec9aa94de4f'
+          SPOTIFY_REFRESH_TOKEN: ${{ secrets.SPOTIFY_REFRESH_TOKEN }}
+        run: python check_podcasts.py
+      - name: Sync unfinished episodes and verify newest-first ordering
+        if: steps.phase.outputs.phase == 'sync' && steps.gate.outputs.skip != 'true'
+        env:
+          SPOTIFY_STATE_FILE: .spotify-run-state.json
           SPOTIFY_CLIENT_ID: '658f7327c1c7439c9cc8cec9aa94de4f'
           SPOTIFY_REFRESH_TOKEN: ${{ secrets.SPOTIFY_REFRESH_TOKEN }}
           DRY_RUN: ${{ inputs.dry_run }}
@@ -58,3 +130,9 @@ jobs:
             args+=(--dry-run)
           fi
           python verified_sync.py "${args[@]}"
+      - name: Preserve latest cooldown and check status
+        if: ${{ always() && steps.phase.outputs.phase != 'preflight' && hashFiles('.spotify-run-state.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .spotify-run-state.json
+          key: spotify-cooldown-${{ github.run_id }}
